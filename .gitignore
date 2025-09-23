@@ -1,0 +1,55 @@
+# Build dirs
+build*/
+cmake-build-*/
+out/
+dist/
+bin/
+obj/
+.vscode/
+.idea/
+*.swp
+
+# Compiled objects
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+
+# Qt generated
+moc_*.cpp
+moc_*.o
+moc_predefs.h
+ui_*.h
+qrc_*.cpp
+qrc_*.o
+
+# qmake/CMake artifacts
+*.qmake.stash
+*.qmake.cache
+Makefile
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# Qt Creator / user files
+*.pro.user
+*.pro.user.*
+*.autosave
+*.user
+
+# Logs
+*.log
+
+# Local test data
+*.db
+*.sqlite
+*.sqlite3
+
+# Ignore old project folders if they’re checked in
+V14-CamVigil-Refresh.pro.user
+V15-CamVigil-PlayBack/
+V15-CamVigil-PlayBack.pro.user
