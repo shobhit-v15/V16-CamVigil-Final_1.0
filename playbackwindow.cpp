@@ -15,6 +15,10 @@
 #include <QVBoxLayout>
 #include "playback_video_player_gst.h"
 #include "playback_stitching_player.h"
+#include "storageservice.h"
+#include <QMessageBox>
+#include <QApplication>
+
 PlaybackWindow::PlaybackWindow(QWidget* parent)
     : QWidget(parent)
 {
@@ -151,9 +155,38 @@ PlaybackWindow::PlaybackWindow(QWidget* parent)
 
                 // Export request stub (wire worker later)
                 connect(trimPanel, &PlaybackTrimPanel::exportRequested, this, [this](){
-                     if (!trim_.enabled || !db || selectedCamId<=0) return;
-                     startExport_();
-                 });
+                                     if (!trim_.enabled || !db || selectedCamId<=0) return;
+                                     // Gate on external storage + user-facing warnings
+                                     auto *ss = StorageService::instance();
+                                     if (!ss->hasExternal()) {
+                                     qWarning() << "[Export] No external media detected";
+                                     QMessageBox::warning(this,
+                                     tr("External media required"),
+                                     tr("No external USB storage detected.\n"
+                                     "Insert a USB drive to export clips."));
+                                      return;
+                              }
+                                 if (ss->freeBytes() <= 0) {
+                                     qWarning() << "[Export] External media has 0 free bytes";
+                                     QMessageBox::warning(this,
+                                     tr("Insufficient space"),
+                                     tr("The external USB storage is full.\n"
+                                     "Free up space and try again."));
+                                     return;
+                                     }
+                                     startExport_();
+                                 });
+
+                    // Cancel export if media is removed mid-run
+                    connect(StorageService::instance(), &StorageService::externalPresentChanged,
+                            this, [this](bool present){
+                            if (!present) {
+                            if (exporter_) QMetaObject::invokeMethod(exporter_, "cancel", Qt::QueuedConnection);
+                            QMessageBox::warning(this,
+                            tr("USB storage removed"),
+                            tr("Export canceled because the external USB drive was removed."));
+                            }
+                            });
 }
 void PlaybackWindow::stopPlayer_() {
     if (!playerThread_) return;
@@ -588,10 +621,16 @@ void PlaybackWindow::runGoFor(const QString& camName, const QDate& day) {
         exporter_ = new PlaybackExporter();
         exporter_->moveToThread(exportThread_);
         connect(exportThread_, &QThread::finished, exporter_, &QObject::deleteLater);
+        // UI busy hooks
+                connect(exporter_, &PlaybackExporter::started,  trimPanel, &PlaybackTrimPanel::onExportStarted);
+                connect(exporter_, &PlaybackExporter::progress, trimPanel, &PlaybackTrimPanel::onExportProgress);
+                connect(exporter_, &PlaybackExporter::finished, trimPanel, &PlaybackTrimPanel::onExportFinished);
+                connect(exporter_, &PlaybackExporter::error,    trimPanel, &PlaybackTrimPanel::onExportError);
 
+                const QString extRoot = QDir(StorageService::instance()->externalRoot()).absolutePath();
         // configure
         ExportOptions opt;
-        opt.outDir   = QDir::home().filePath("CamVigilExports");
+        opt.outDir   = QDir(extRoot).filePath("CamVigilExports");
         opt.baseName = currentDay_.isValid() ? currentDay_.toString("yyyy-MM-dd")
                                              : QDate::currentDate().toString("yyyy-MM-dd");
         opt.precise  = false;    // set true if you want frame-accurate re-encode
@@ -625,9 +664,23 @@ void PlaybackWindow::runGoFor(const QString& camName, const QDate& day) {
         });
         connect(exporter_, &PlaybackExporter::error, this, [cleanup](const QString& e){
             qWarning() << "[Export] error:" << e;
+            // Promote notable errors to UI popups
+                        QWidget *win = nullptr;
+                       // Try to find a top-level widget for the dialog parent
+                        for (QWidget *w : QApplication::topLevelWidgets()) { if (w->isActiveWindow()) { win = w; break; } }
+                        const QString msg =
+                            (e.contains("No external media", Qt::CaseInsensitive))
+                                ? QObject::tr("No external USB storage detected.")
+                            : (e.contains("Not enough free space", Qt::CaseInsensitive))
+                                ? QObject::tr("Not enough free space on the external USB drive for this export.")
+                            : e;
+                        QMessageBox::warning(win ? win : nullptr,
+                                             QObject::tr("Export failed"),
+                                             msg);
             cleanup();
         });
-
+        // Indicate busy immediately
+        emit exporter_->started();
         exportThread_->start();
         QMetaObject::invokeMethod(exporter_, "start", Qt::QueuedConnection);
     }

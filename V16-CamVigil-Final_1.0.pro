@@ -55,6 +55,7 @@ SOURCES += \
     playbackwindow.cpp \
     settingswindow.cpp \
     storagedetailswidget.cpp \
+    storageservice.cpp \
     streammanager.cpp \
     streamworker.cpp \
     subscriptionmanager.cpp \
@@ -96,6 +97,7 @@ HEADERS += \
     playbackwindow.h \
     settingswindow.h \
     storagedetailswidget.h \
+    storageservice.h \
     streammanager.h \
     streamworker.h \
     subscriptionmanager.h \
