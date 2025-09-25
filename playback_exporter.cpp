@@ -6,8 +6,7 @@
 #include <QFileInfo>
 #include <QDate>
 #include <QTextStream>
-#include <QStorageInfo>
-#include <QCryptographicHash>
+#include <QDateTime>
 
 static inline double secFromNs(qint64 ns){ return double(ns)/1e9; }
 
@@ -29,21 +28,21 @@ void PlaybackExporter::start(){
     if (selEndNs_ <= selStartNs_) { emit error("Invalid selection"); return; }
     if (playlist_.isEmpty()) { emit error("No playlist"); return; }
 
-    // Enforce external storage presence
+    // Require external storage
     auto *ss = StorageService::instance();
     if (!ss->hasExternal()) { emit error("No external media detected"); return; }
 
-    // Set default outDir if caller forgot
+    // Default output dir if not provided
     if (opts_.outDir.isEmpty()) {
         opts_.outDir = QDir(ss->externalRoot()).filePath("CamVigilExports");
     }
-
     if (!ensureOutDir_(nullptr)) { emit error("Cannot create output directory"); return; }
 
+    // Plan parts
     const auto parts = computeParts_();
     if (parts.isEmpty()) { emit error("Selection overlaps no files"); return; }
 
-    // Estimate and free-space check
+    // Free-space check on external drive for final file
     const qint64 estimate = estimateBytes_(parts);
     const qint64 free = ss->freeBytes();
     const qint64 need = qMax(opts_.minFreeBytes, estimate);
@@ -54,43 +53,34 @@ void PlaybackExporter::start(){
         return;
     }
 
-    // Temp dir on external drive to avoid cross-fs concat issues
-    const QString tmpRoot = QDir(opts_.outDir).filePath(".tmp_export_" + QString::number(QDateTime::currentMSecsSinceEpoch()));
-    QDir().mkpath(tmpRoot);
-    emit log(QString("[Export] tmp: %1").arg(tmpRoot));
+    // Work in an internal temp dir for speed, then copy the final to USB
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) { emit error("Temp directory creation failed"); return; }
+    const QString tempDir = tmp.path();
+    emit log(QString("[Export] tmp: %1").arg(tempDir));
 
-    QStringList cutPaths;
-    if (!cutParts_(parts, &cutPaths, tmpRoot)) {
-        QDir(tmpRoot).removeRecursively();
-        emit error("Cut failed"); return;
-    }
-    if (abort_.load()) { QDir(tmpRoot).removeRecursively(); emit error("Canceled"); return; }
+    // Build list of inputs for concat: cut only non-whole parts
+    QStringList inputPaths;
+    if (!buildInputs_(parts, tempDir, &inputPaths)) { emit error("Prepare inputs failed"); return; }
+    if (abort_.load()) { emit error("Canceled"); return; }
 
-    const QString listPath = QDir(tmpRoot).filePath("concat_inputs.txt");
-    if (!writeConcatList_(cutPaths, listPath)) {
-        QDir(tmpRoot).removeRecursively();
-        emit error("Concat list write failed"); return;
-    }
+    // Concat list in temp
+    QString listPath;
+    if (!writeConcatList_(inputPaths, &listPath)) { emit error("Concat list write failed"); return; }
 
-    const QString finalPath = uniqueOutPath_();
-    const QString outTmp = QDir(tmpRoot).filePath("out.tmp.mp4");
-    if (!concat_(listPath, outTmp)) {
-        QDir(tmpRoot).removeRecursively();
-        emit error("Concat failed"); return;
-    }
-    if (abort_.load()) { QDir(tmpRoot).removeRecursively(); emit error("Canceled"); return; }
+    // Concat to temp, then copy to external outDir
+    const QString finalOut = uniqueOutPath_();
+    const QString tmpOut   = QDir(tempDir).filePath(QFileInfo(finalOut).fileName());
+    if (!concat_(listPath, tmpOut)) { emit error("Concat failed"); return; }
+    if (abort_.load()) { emit error("Canceled"); return; }
 
-    // Atomic finalize
-    QFile::remove(finalPath);
-    if (!QFile::rename(outTmp, finalPath)) {
-        QDir(tmpRoot).removeRecursively();
-        emit error("Finalize failed"); return;
-    }
-    QDir(tmpRoot).removeRecursively();
+    // Copy final to external volume
+    if (QFile::exists(finalOut)) QFile::remove(finalOut);
+    if (!QFile::copy(tmpOut, finalOut)) { emit error(QString("Failed to copy to %1").arg(finalOut)); return; }
 
     emit progress(100.0);
-    emit log(QString("[Export] OK -> %1").arg(finalPath));
-    emit finished(finalPath);
+    emit log(QString("[Export] OK -> %1").arg(finalOut));
+    emit finished(finalOut);
 }
 
 QVector<ClipPart> PlaybackExporter::computeParts_() const {
@@ -100,7 +90,15 @@ QVector<ClipPart> PlaybackExporter::computeParts_() const {
     for (const auto& fs : playlist_) {
         const qint64 a = std::max(fs.start_ns, selAbsA);
         const qint64 b = std::min(fs.end_ns,   selAbsB);
-        if (b > a) out.push_back({ fs.path, a - fs.start_ns, b - fs.start_ns });
+        if (b > a) {
+            const bool whole = (a == fs.start_ns) && (b == fs.end_ns);
+            out.push_back(ClipPart{
+                fs.path,
+                a - fs.start_ns,
+                b - fs.start_ns,
+                whole
+            });
+        }
         if (fs.end_ns >= selAbsB) break;
     }
     return out;
@@ -140,22 +138,29 @@ bool PlaybackExporter::runFfmpeg_(const QStringList& args, QByteArray* errOut){
             return false;
         }
         p.waitForReadyRead(50);
-        // TODO: parse stderr for progress if precise=true
     }
     if (errOut) *errOut = p.readAllStandardError();
     return p.exitStatus()==QProcess::NormalExit && p.exitCode()==0;
 }
 
-bool PlaybackExporter::cutParts_(const QVector<ClipPart>& parts, QStringList* cutPaths, const QString& tmpDir){
+bool PlaybackExporter::buildInputs_(const QVector<ClipPart>& parts,
+                                    const QString& tempDir,
+                                    QStringList* inputPaths){
     const int N = parts.size();
-    cutPaths->reserve(N);
+    inputPaths->reserve(N);
     for (int i=0;i<N;++i) {
         if (abort_.load()) return false;
         const auto& part = parts[i];
+
+        if (part.wholeFile) {
+            inputPaths->push_back(QFileInfo(part.path).absoluteFilePath());
+            continue;
+        }
+
         const double ss = secFromNs(part.inStartNs);
         const double to = secFromNs(part.inEndNs);
-        const QString cut = QDir(tmpDir).filePath(QString("part_%1.mkv").arg(i,4,10,QChar('0')));
-        cutPaths->push_back(cut);
+        const QString cut = QDir(tempDir).filePath(QString("part_%1.mkv").arg(i,4,10,QChar('0')));
+        inputPaths->push_back(cut);
 
         QStringList args; args << "-hide_banner" << "-y";
         if (opts_.precise) {
@@ -186,19 +191,21 @@ bool PlaybackExporter::cutParts_(const QVector<ClipPart>& parts, QStringList* cu
         QByteArray err;
         emit log(QString("[Export] cut %1/%2").arg(i+1).arg(N));
         if (!runFfmpeg_(args, &err)) { emit log(QString::fromUtf8(err)); return false; }
-        emit progress( (i+1) * 100.0 / (N+1) );
+        emit progress( (i+1) * 100.0 / (N+2) ); // leave headroom for concat/final copy
     }
     return true;
 }
 
-bool PlaybackExporter::writeConcatList_(const QStringList& cutPaths, const QString& listPath){
-    QFile f(listPath);
+bool PlaybackExporter::writeConcatList_(const QStringList& inputPaths, QString* listPath){
+    const QString p = QDir::temp().absoluteFilePath("concat_inputs.txt");
+    QFile f(p);
     if (!f.open(QIODevice::WriteOnly|QIODevice::Text)) return false;
     QTextStream ts(&f);
-    for (const auto& cp : cutPaths) {
+    for (const auto& cp : inputPaths) {
         ts << "file '" << QFileInfo(cp).absoluteFilePath().replace('\'',"\\'") << "'\n";
     }
     f.close();
+    *listPath = p;
     return true;
 }
 
@@ -222,21 +229,18 @@ bool PlaybackExporter::concat_(const QString& listPath, const QString& outPath){
     emit log("[Export] concat");
     const bool ok = runFfmpeg_(args, &err);
     if (!ok) emit log(QString::fromUtf8(err));
-    else emit log(QString("[Export] wrote %1").arg(outPath));
+    else     emit log(QString("[Export] wrote %1").arg(outPath));
+    emit progress(99.0);
     return ok;
 }
 
 qint64 PlaybackExporter::estimateBytes_(const QVector<ClipPart>& parts) const {
-    // Estimate by total duration. Same path for precise/non-precise to avoid dead stores.
-        double durSec = 0.0;
-        for (const auto& p : parts) durSec += secFromNs(p.inEndNs - p.inStartNs);
-        // Assume conservative bitrate:
-        // - copy mode: 4 Mbps video + 128 kbps audio
-        // - precise  : 6 Mbps video + 128 kbps audio
-        const double v_bps = opts_.precise ? 6.0e6 : 4.0e6;
-        const double a_bps = 128.0e3;
-        qint64 bytes = qint64((v_bps + a_bps) * durSec / 8.0);
-        // Floor to 200MB to account for container overhead and variance.
-        if (bytes < 200ll*1024*1024) bytes = 200ll*1024*1024;
-        return bytes;
+    // Duration-based estimate. Same path for precise/non-precise.
+    double durSec = 0.0;
+    for (const auto& p : parts) durSec += secFromNs(p.inEndNs - p.inStartNs);
+    const double v_bps = opts_.precise ? 6.0e6 : 4.0e6; // conservative
+    const double a_bps = 128.0e3;
+    qint64 bytes = qint64((v_bps + a_bps) * durSec / 8.0);
+    if (bytes < 200ll*1024*1024) bytes = 200ll*1024*1024; // floor 200MB
+    return bytes;
 }

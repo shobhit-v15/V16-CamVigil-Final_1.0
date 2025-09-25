@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QVector>
+#include <QStringList>
 #include <QString>
 #include <atomic>
 #include <QProcess>
@@ -17,14 +18,15 @@ struct ExportOptions {
     int crf = 18;                // used if precise
     bool copyAudio = true;       // precise mode: copy audio if possible
 
-    // Optional guardrails
+    // Guardrail for free space on external drive
     qint64 minFreeBytes = 512ll * 1024 * 1024; // 512 MB
 };
 
 struct ClipPart {
     QString path;
-    qint64  inStartNs;   // offset inside file
-    qint64  inEndNs;     // offset inside file
+    qint64  inStartNs;   // offset inside file (relative to file start)
+    qint64  inEndNs;     // offset inside file (relative to file start)
+    bool    wholeFile;   // true => use original file without cutting
 };
 
 class PlaybackExporter final : public QObject {
@@ -32,6 +34,7 @@ class PlaybackExporter final : public QObject {
 public:
     explicit PlaybackExporter(QObject* parent=nullptr);
 
+    // Required inputs
     void setPlaylist(const QVector<PlaybackSegmentIndex::FileSeg>& playlist, qint64 dayStartNs);
     void setSelection(qint64 selStartNs, qint64 selEndNs); // ns from midnight
     void setOptions(const ExportOptions& opts);
@@ -55,13 +58,14 @@ private:
     ExportOptions opts_;
     std::atomic_bool abort_{false};
 
-    QVector<ClipPart> computeParts_() const;
+    QVector<ClipPart> computeParts_() const;                              // mix: cut first/last, pass whole middles
     bool ensureOutDir_(QString* err) const;
     QString uniqueOutPath_() const;
     bool runFfmpeg_(const QStringList& args, QByteArray* errOut);
-    bool cutParts_(const QVector<ClipPart>& parts, QStringList* cutPaths, const QString& tmpDir);
-    bool writeConcatList_(const QStringList& cutPaths, const QString& listPath);
+    bool buildInputs_(const QVector<ClipPart>& parts,
+                      const QString& tempDir,
+                      QStringList* inputPaths);                            // cuts to temp, passes whole files
+    bool writeConcatList_(const QStringList& inputPaths, QString* listPath);
     bool concat_(const QString& listPath, const QString& outPath);
-
     qint64 estimateBytes_(const QVector<ClipPart>& parts) const;
 };
