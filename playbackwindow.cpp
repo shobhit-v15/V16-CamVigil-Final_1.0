@@ -124,6 +124,7 @@ PlaybackWindow::PlaybackWindow(QWidget* parent)
                     timelineView->setSelection(trim_.start_ns, trim_.end_ns, on);
                     trimPanel->setEnabledPanel(on);
                     trimPanel->setDayStartNs(dayStartNs_);
+                    if (on) trimPanel->setPhaseIdle();
                     trimPanel->setRangeNs(trim_.start_ns, trim_.end_ns);
                     // start playback cursor at the selection start for clarity
                     if (timelineView) timelineView->setPlayheadNs(trim_.start_ns);
@@ -153,40 +154,105 @@ PlaybackWindow::PlaybackWindow(QWidget* parent)
                     trimPanel->setRangeNs(s, e);
                 });
 
-                // Export request stub (wire worker later)
-                connect(trimPanel, &PlaybackTrimPanel::exportRequested, this, [this](){
-                                     if (!trim_.enabled || !db || selectedCamId<=0) return;
-                                     // Gate on external storage + user-facing warnings
-                                     auto *ss = StorageService::instance();
-                                     if (!ss->hasExternal()) {
-                                     qWarning() << "[Export] No external media detected";
-                                     QMessageBox::warning(this,
-                                     tr("External media required"),
-                                     tr("No external USB storage detected.\n"
-                                     "Insert a USB drive to export clips."));
-                                      return;
-                              }
-                                 if (ss->freeBytes() <= 0) {
-                                     qWarning() << "[Export] External media has 0 free bytes";
-                                     QMessageBox::warning(this,
-                                     tr("Insufficient space"),
-                                     tr("The external USB storage is full.\n"
-                                     "Free up space and try again."));
-                                     return;
-                                     }
-                                     startExport_();
-                                 });
+                // --- Export two-phase wiring (Clip -> Save) ---
+                                connect(trimPanel, &PlaybackTrimPanel::clipRequested, this, [this](){
+                                    if (!trim_.enabled || !db || selectedCamId <= 0) return;
+                                    if (exportThread_) { qWarning() << "[Export] already running"; return; }
 
-                    // Cancel export if media is removed mid-run
-                    connect(StorageService::instance(), &StorageService::externalPresentChanged,
-                            this, [this](bool present){
-                            if (!present) {
-                            if (exporter_) QMetaObject::invokeMethod(exporter_, "cancel", Qt::QueuedConnection);
-                            QMessageBox::warning(this,
-                            tr("USB storage removed"),
-                            tr("Export canceled because the external USB drive was removed."));
-                            }
-                            });
+                                    // Spawn exporter thread
+                                    exportThread_ = new QThread(this);
+                                    exporter_ = new PlaybackExporter();
+                                    exporter_->moveToThread(exportThread_);
+                                    connect(exportThread_, &QThread::finished, exporter_, &QObject::deleteLater);
+                                    exportThread_->start();
+
+                                    // Configure for CLIP stage (temp preparation – no external required)
+                                    ExportOptions clipOpts;
+                                    clipOpts.baseName = currentDay_.isValid()
+                                        ? currentDay_.toString("yyyy-MM-dd")
+                                        : QDate::currentDate().toString("yyyy-MM-dd");
+                                    clipOpts.precise   = false;
+                                    clipOpts.copyAudio = true;
+                                    exporter_->setPlaylist(segIndex_.playlist(), dayStartNs_);
+                                    exporter_->setSelection(trim_.start_ns, trim_.end_ns);
+                                    exporter_->setOptions(clipOpts);
+
+                                    trimPanel->setPhaseClipping();   // shows "Clipping %p%", gray bar
+
+                                    // Progress during clipping
+                                    connect(exporter_, &PlaybackExporter::progress,
+                                            trimPanel, &PlaybackTrimPanel::setProgress,
+                                            Qt::QueuedConnection);
+
+                                    // Prepared -> allow save, mark as "Video clipped"
+                                    connect(exporter_, &PlaybackExporter::prepared, this, [this](){
+                                        trimPanel->setPhaseClipped();
+                                    }, Qt::QueuedConnection);
+
+                                    // Any error during clipping
+                                    connect(exporter_, &PlaybackExporter::error, this, [this](const QString& e){
+                                        qWarning() << "[Export][clip] error:" << e;
+                                        trimPanel->setPhaseError(e);
+                                        trimPanel->enableSave(false);
+                                        // teardown exporter thread
+                                        exportThread_->quit();
+                                        if (!exportThread_->wait(2000)) { exportThread_->terminate(); exportThread_->wait(); }
+                                        exportThread_->deleteLater(); exportThread_=nullptr; exporter_=nullptr;
+                                        QMessageBox::warning(this, tr("Export failed"), e);
+                                    }, Qt::QueuedConnection);
+
+                                    // Kick the CLIP stage
+                                    QMetaObject::invokeMethod(exporter_, "startPrepare", Qt::QueuedConnection);
+                                }, Qt::QueuedConnection);
+
+                                connect(trimPanel, &PlaybackTrimPanel::saveRequested, this, [this](){
+                                    if (!exporter_ || !exportThread_) return;
+
+                                    // Guard: external storage present & usable
+                                    auto *ss = StorageService::instance();
+                                    if (!ss->hasExternal()) {
+                                        QMessageBox::warning(this, tr("External media required"),
+                                                             tr("No external USB storage detected.\nInsert a USB drive to save the clip."));
+                                        return;
+                                    }
+                                    trimPanel->setPhaseSaving();
+
+                                    // Set final output directory on external
+                                    ExportOptions saveOpts;
+                                    saveOpts.outDir = QDir(ss->externalRoot()).filePath("CamVigilExports");
+                                    // hand options to exporter on its thread and start save
+                                    QMetaObject::invokeMethod(exporter_, [this, saveOpts](){
+                                        exporter_->setOptions(saveOpts);
+                                        exporter_->saveToExternal();
+                                    }, Qt::QueuedConnection);
+
+                                    // Progress during saving
+                                    connect(exporter_, &PlaybackExporter::progress,
+                                            trimPanel, &PlaybackTrimPanel::setProgress,
+                                            Qt::QueuedConnection);
+
+                                    // Success
+                                    connect(exporter_, &PlaybackExporter::saved, this, [this](const QString& outPath){
+                                        qInfo() << "[Export] saved:" << outPath;
+                                        trimPanel->setPhaseSaved();
+                                        // cleanup exporter thread
+                                        exportThread_->quit();
+                                        if (!exportThread_->wait(2000)) { exportThread_->terminate(); exportThread_->wait(); }
+                                        exportThread_->deleteLater(); exportThread_=nullptr; exporter_=nullptr;
+                                    }, Qt::QueuedConnection);
+
+                                    // Error while saving
+                                    connect(exporter_, &PlaybackExporter::error, this, [this](const QString& e){
+                                        qWarning() << "[Export][save] error:" << e;
+                                        trimPanel->setPhaseError(e);
+                                        QMessageBox::warning(this, tr("Save failed"), e);
+                                        // keep exporter thread alive so user can retry Save without reclipping?
+                                        // If you prefer to teardown on error, uncomment:
+                                        // exportThread_->quit();
+                                        // if (!exportThread_->wait(2000)) { exportThread_->terminate(); exportThread_->wait(); }
+                                        // exportThread_->deleteLater(); exportThread_=nullptr; exporter_=nullptr;
+                                    }, Qt::QueuedConnection);
+                                }, Qt::QueuedConnection);
 }
 void PlaybackWindow::stopPlayer_() {
     if (!playerThread_) return;
@@ -608,80 +674,6 @@ void PlaybackWindow::runGoFor(const QString& camName, const QDate& day) {
         if (trimPanel)    trimPanel->setRangeNs(trim_.start_ns, trim_.end_ns);
         if (trimPanel)    trimPanel->setDurationLabel(trim_.end_ns - trim_.start_ns);
     }
-    void PlaybackWindow::startExport_() {
-        if (exportThread_) {
-            qWarning() << "[Export] already running";
-            return;
-        }
-        if (segIndex_.playlist().isEmpty()) {
-            qWarning() << "[Export] empty playlist";
-            return;
-        }
-        exportThread_ = new QThread(this);
-        exporter_ = new PlaybackExporter();
-        exporter_->moveToThread(exportThread_);
-        connect(exportThread_, &QThread::finished, exporter_, &QObject::deleteLater);
-        // UI busy hooks
-                connect(exporter_, &PlaybackExporter::started,  trimPanel, &PlaybackTrimPanel::onExportStarted);
-                connect(exporter_, &PlaybackExporter::progress, trimPanel, &PlaybackTrimPanel::onExportProgress);
-                connect(exporter_, &PlaybackExporter::finished, trimPanel, &PlaybackTrimPanel::onExportFinished);
-                connect(exporter_, &PlaybackExporter::error,    trimPanel, &PlaybackTrimPanel::onExportError);
 
-                const QString extRoot = QDir(StorageService::instance()->externalRoot()).absolutePath();
-        // configure
-        ExportOptions opt;
-        opt.outDir   = QDir(extRoot).filePath("CamVigilExports");
-        opt.baseName = currentDay_.isValid() ? currentDay_.toString("yyyy-MM-dd")
-                                             : QDate::currentDate().toString("yyyy-MM-dd");
-        opt.precise  = false;    // set true if you want frame-accurate re-encode
-        opt.copyAudio= true;
 
-        exporter_->setPlaylist(segIndex_.playlist(), dayStartNs_);
-        exporter_->setSelection(trim_.start_ns, trim_.end_ns);
-        exporter_->setOptions(opt);
-
-        // logs/progress
-        connect(exporter_, &PlaybackExporter::log, this,
-                [](const QString& s){ qInfo().noquote() << s; });
-        connect(exporter_, &PlaybackExporter::progress, this,
-                [](double p){ qInfo() << "[Export] progress" << p; });
-
-        auto cleanup = [this](){
-            if (!exportThread_) return;
-            exportThread_->quit();
-            if (!exportThread_->wait(3000)) {
-                exportThread_->terminate();
-                exportThread_->wait();
-            }
-            exportThread_->deleteLater();
-            exportThread_ = nullptr;
-            exporter_ = nullptr;
-        };
-
-        connect(exporter_, &PlaybackExporter::finished, this, [cleanup](const QString& out){
-            qInfo() << "[Export] done ->" << out;
-            cleanup();
-        });
-        connect(exporter_, &PlaybackExporter::error, this, [cleanup](const QString& e){
-            qWarning() << "[Export] error:" << e;
-            // Promote notable errors to UI popups
-                        QWidget *win = nullptr;
-                       // Try to find a top-level widget for the dialog parent
-                        for (QWidget *w : QApplication::topLevelWidgets()) { if (w->isActiveWindow()) { win = w; break; } }
-                        const QString msg =
-                            (e.contains("No external media", Qt::CaseInsensitive))
-                                ? QObject::tr("No external USB storage detected.")
-                            : (e.contains("Not enough free space", Qt::CaseInsensitive))
-                                ? QObject::tr("Not enough free space on the external USB drive for this export.")
-                            : e;
-                        QMessageBox::warning(win ? win : nullptr,
-                                             QObject::tr("Export failed"),
-                                             msg);
-            cleanup();
-        });
-        // Indicate busy immediately
-        emit exporter_->started();
-        exportThread_->start();
-        QMetaObject::invokeMethod(exporter_, "start", Qt::QueuedConnection);
-    }
 
