@@ -6,7 +6,11 @@
 #include <QDateTime>
 #include <QtDebug>
 
-DbReader::DbReader(QObject* parent) : QObject(parent) {}
+DbReader::DbReader(QObject* parent) : QObject(parent) {
+    // Ensure queued connections work for custom types
+    qRegisterMetaType<RecentSegment>("RecentSegment");
+    qRegisterMetaType<QVector<RecentSegment>>("QVector<RecentSegment>");
+}
 
 DbReader::~DbReader() {
     // ensure clean teardown even if window is closed externally
@@ -174,4 +178,40 @@ void DbReader::listSegments(int cameraId, const QString& ymd) {
     }
     emit segmentsReady(cameraId, segs);
 }
+void DbReader::listRecentSegments(int limit) {
+    QVector<RecentSegment> out;
+    QSqlQuery q(db_);
+    q.setForwardOnly(true);
 
+    // Use end_utc_ns if set, else derive from duration_ms, else fall back to start_utc_ns
+    q.prepare(R"SQL(
+      SELECT s.file_path,
+             COALESCE(c.name, s.camera_url) AS camera_name,
+             s.start_utc_ns,
+             CASE
+               WHEN s.end_utc_ns IS NOT NULL AND s.end_utc_ns > 0 THEN s.end_utc_ns
+               WHEN COALESCE(s.duration_ms,0) > 0 THEN s.start_utc_ns + s.duration_ms*1000000
+               ELSE s.start_utc_ns
+             END AS eff_end_ns,
+             COALESCE(s.duration_ms, 0)
+      FROM segments s
+      LEFT JOIN cameras c ON c.id = s.camera_id
+      WHERE s.status IN (0,1)
+      ORDER BY s.start_utc_ns DESC
+      LIMIT :lim
+    )SQL");
+    q.bindValue(":lim", limit);
+
+    if (!q.exec()) { emit error(q.lastError().text()); return; }
+
+    while (q.next()) {
+        RecentSegment r;
+        r.path        = q.value(0).toString();
+        r.camera_name = q.value(1).toString();
+        r.start_ns    = q.value(2).toLongLong();
+        r.end_ns      = q.value(3).toLongLong();
+        r.duration_ms = q.value(4).toLongLong();
+        out.push_back(r);
+    }
+    emit recentSegmentsReady(out);
+}

@@ -7,10 +7,12 @@
 #include <QListWidget>
 #include <QLabel>
 #include <QPushButton>
+#include <QThread>
 #include "videoplayerwindow.h"
 #include "cameramanager.h"
 #include "archivemanager.h"
 #include <QMovie>
+#include "db_reader.h"
 struct VideoMetadata {
     QString filePath;
     QString displayText;
@@ -31,6 +33,8 @@ private slots:
     void loadVideoFiles(const QDate &date);
     void showThumbnail(QListWidgetItem *item);
     void openVideoPlayer(QListWidgetItem *item);
+    void refreshFromDb();  // new: trigger DB fetch
+    void onRecentSegments(const QVector<RecentSegment>& segs); // new: populate UI
 
 private:
     QMovie *buttonSpinner;
@@ -46,10 +50,16 @@ private:
     QString formatFileName(const QString &rawFileName, double durationSeconds);
     QString getVideoDuration(const QString &videoPath);
     void generateThumbnail(const QString &videoPath);
-
+    static QString humanDurFromMs(qint64 ms); // new: duration formatting
     CameraManager* cameraManager;
     ArchiveManager* archiveManager;  // New pointer for ArchiveManager
+    // FS scan no longer used on hot path; keep only if needed elsewhere
     QList<VideoMetadata> extractVideoMetadata(const QString& archiveDirPath);
+
+    // DB members
+    QThread*  dbThread_ = nullptr;
+    DbReader* dbReader_ = nullptr;
+    QString   dbPath_;
 };
 
 #endif // ARCHIVEWIDGET_H

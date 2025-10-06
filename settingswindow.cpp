@@ -151,10 +151,10 @@ SettingsWindow::SettingsWindow(ArchiveManager* archiveManager,
     scrollLayout->addStretch();
 
     // ─── Archive List ───────────────────────────────────────────────────────
-    QLabel* archiveTitle = new QLabel("Archives", scrollContent);
-    archiveTitle->setAlignment(Qt::AlignCenter);
-    archiveTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
-    scrollLayout->addWidget(archiveTitle);
+//    QLabel* archiveTitle = new QLabel("Archives", scrollContent);
+//    archiveTitle->setAlignment(Qt::AlignCenter);
+//    archiveTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
+//    scrollLayout->addWidget(archiveTitle);
 
     archiveWidget = new ArchiveWidget(cameraManager, archiveManager);
     archiveWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);

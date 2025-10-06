@@ -67,7 +67,7 @@ ArchiveWidget::ArchiveWidget(CameraManager* camManager, ArchiveManager* archiveM
         "}"
     );
     refreshButton->setCursor(Qt::PointingHandCursor);
-    connect(refreshButton, &QPushButton::clicked, this, &ArchiveWidget::refreshBackupDates);
+    connect(refreshButton, &QPushButton::clicked, this, &ArchiveWidget::refreshFromDb);
     topBarLayout->addWidget(refreshButton, 0, Qt::AlignRight);
 
     mainLayout->addLayout(topBarLayout, 0);
@@ -140,66 +140,73 @@ ArchiveWidget::ArchiveWidget(CameraManager* camManager, ArchiveManager* archiveM
 
     setLayout(mainLayout);
 
-    //  the archive directory provided by ArchiveManager.
-    archiveDir = archiveManager->getArchiveDir();
-    refreshBackupDates();
+    // archive directory (for thumbnails) and DB path
+        archiveDir = archiveManager->getArchiveDir();
+        dbPath_    = ArchiveManager::defaultStorageRoot() + "/CamVigilArchives/camvigil.sqlite";
+
+        // bring up DbReader in dedicated thread
+        dbThread_ = new QThread(this);
+        dbReader_ = new DbReader();
+        dbReader_->moveToThread(dbThread_);
+        connect(dbThread_, &QThread::finished, dbReader_, &QObject::deleteLater);
+        connect(dbReader_, &DbReader::recentSegmentsReady, this, &ArchiveWidget::onRecentSegments);
+        dbThread_->start();
+        QMetaObject::invokeMethod(dbReader_, "openAt", Qt::QueuedConnection, Q_ARG(QString, dbPath_));
+
+        // initial load from DB
+        refreshFromDb();
 }
 
 //  implementation for loadVideoFiles slot (even if not fully used)
 void ArchiveWidget::loadVideoFiles(const QDate &date) {
     qDebug() << "loadVideoFiles() called for date:" << date.toString();
-    //  refresh the backup dates.
-    refreshBackupDates();
+    // keep behavior: refresh list
+    refreshFromDb();
 }
 
 void ArchiveWidget::refreshBackupDates() {
-    videoListWidget->clear();  // Clear existing list
+    // kept for API compatibility; redirect to DB-backed flow
+    refreshFromDb();
+}
+void ArchiveWidget::refreshFromDb() {
+    videoListWidget->clear();
     refreshButton->setEnabled(false);
-    refreshButton->setText("");  // Hide label text
+    refreshButton->setText("");
     buttonSpinner->start();
     refreshButton->setIcon(QIcon(buttonSpinner->currentPixmap()));
-
-    connect(buttonSpinner, &QMovie::frameChanged, this, [=]() {
+    // keep icon animation in sync
+    connect(buttonSpinner, &QMovie::frameChanged, this, [this]() {
         refreshButton->setIcon(QIcon(buttonSpinner->currentPixmap()));
     });
-
-    archiveDir = archiveManager->getArchiveDir();  // ArchiveManager's path
-    if (archiveDir.isEmpty()) {
-        qDebug() << "No external storage archive directory available.";
-        thumbnailLabel->setText("No external device connected.");
-        buttonSpinner->stop();
-            refreshButton->setIcon(QIcon());
-            refreshButton->setText("Refresh Archives");
-            refreshButton->setEnabled(true);
-            return;
-    }
-
-
-    QFutureWatcher<QList<VideoMetadata>> *watcher = new QFutureWatcher<QList<VideoMetadata>>(this);
-
-    connect(watcher, &QFutureWatcher<QList<VideoMetadata>>::finished, this, [this, watcher]() {
-        const QList<VideoMetadata> metadataList = watcher->result();
-        for (const auto &meta : metadataList) {
-            QListWidgetItem *item = new QListWidgetItem(meta.displayText);
-            item->setData(Qt::UserRole, meta.filePath);
-            videoListWidget->addItem(item);
-        }
-
-        // Stops the spinner and restore the button text/icon
-        buttonSpinner->stop();
-        refreshButton->setIcon(QIcon());
-        refreshButton->setText("Refresh Archives");
-        refreshButton->setEnabled(true);
-
-        videoListWidget->show();
-        watcher->deleteLater();
-    });
-
-
-    QFuture<QList<VideoMetadata>> future = QtConcurrent::run(this, &ArchiveWidget::extractVideoMetadata, archiveDir);
-    watcher->setFuture(future);
+    // ask DB for latest N segments
+    QMetaObject::invokeMethod(dbReader_, "listRecentSegments", Qt::QueuedConnection, Q_ARG(int, 500));
 }
 
+QString ArchiveWidget::humanDurFromMs(qint64 ms){
+    if (ms <= 0) return "00:00";
+    QTime t(0,0); t = t.addMSecs(int(ms));
+    return ms < 3600000 ? t.toString("mm:ss") : t.toString("hh:mm:ss");
+}
+
+void ArchiveWidget::onRecentSegments(const QVector<RecentSegment>& segs) {
+    for (const auto& s : segs) {
+        const QDateTime startLocal = QDateTime::fromSecsSinceEpoch(s.start_ns/1000000000LL, Qt::LocalTime);
+        const QString dateStr = startLocal.date().toString("MMM d, yyyy");
+        const QString timeStr = startLocal.time().toString("HH:mm");
+        QString dur = humanDurFromMs(s.duration_ms > 0 ? s.duration_ms
+                              : qMax<qint64>(0, (s.end_ns - s.start_ns)/1000000LL));
+        const QString cameraName = s.camera_name.isEmpty() ? QStringLiteral("UnknownCam") : s.camera_name;
+        const QString display = QString("%1 | %2 | %3 | %4").arg(cameraName, dateStr, timeStr, dur);
+        auto *item = new QListWidgetItem(display);
+        item->setData(Qt::UserRole, s.path);
+        videoListWidget->addItem(item);
+    }
+    buttonSpinner->stop();
+    refreshButton->setIcon(QIcon());
+    refreshButton->setText("Refresh Archives");
+    refreshButton->setEnabled(true);
+    videoListWidget->show();
+}
 
 QString ArchiveWidget::formatFileName(const QString &rawFileName,
                                       const QString &absolutePath)
