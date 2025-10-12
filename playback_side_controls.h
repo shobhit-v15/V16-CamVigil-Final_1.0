@@ -18,6 +18,7 @@ signals:
     void forward10Clicked();
     void speedCycleClicked();
     void previousDayClicked();
+    void nextDayClicked();
 
 private:
     QPushButton* play_{nullptr};
@@ -26,4 +27,5 @@ private:
     QPushButton* forward10_{nullptr};
     QPushButton* speed_{nullptr};
     QPushButton* prevDay_{nullptr};
+    QPushButton* nextDay_{nullptr};
 };

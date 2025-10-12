@@ -655,6 +655,12 @@ void PlaybackWindow::runGoFor(const QString& camName, const QDate& day) {
             }
             runGoFor(lastCamName_, prev);
         });
+        connect(sideControls, &PlaybackSideControls::nextDayClicked, this, [this](){
+            const QDate base = currentDay_.isValid() ? currentDay_ : QDate::currentDate();
+            const QDate next = base.addDays(1);
+            if (lastCamName_.isEmpty()) { qWarning() << "[PW] Next day clicked but no camera selected yet"; return; }
+            runGoFor(lastCamName_, next);
+        });
     }
     // ---------- helpers ----------
     void PlaybackWindow::updateTrimClamps_(){

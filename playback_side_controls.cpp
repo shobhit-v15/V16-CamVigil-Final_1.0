@@ -20,9 +20,10 @@ PlaybackSideControls::PlaybackSideControls(QWidget* parent)
     rewind10_  = new QPushButton("⏪ 10s", this);
     forward10_ = new QPushButton("10s ⏩", this);
     speed_     = new QPushButton("Speed 1x", this);
-    prevDay_   = new QPushButton("◀ Prev day", this);   // NEW
+    prevDay_   = new QPushButton("◀ Prev day", this);
+    nextDay_   = new QPushButton("Next day ▶", this);
 
-    for (auto* b : {play_, pause_, rewind10_, forward10_, speed_, prevDay_}) {
+    for (auto* b : {play_, pause_, rewind10_, forward10_, speed_, prevDay_, nextDay_}) {
         b->setStyleSheet(btnStyle);
         b->setFixedHeight(36);
         b->setMinimumWidth(120);
@@ -38,6 +39,7 @@ PlaybackSideControls::PlaybackSideControls(QWidget* parent)
     lay->addWidget(forward10_, 0, Qt::AlignHCenter);
     lay->addWidget(speed_,     0, Qt::AlignHCenter);
     lay->addWidget(prevDay_,   0, Qt::AlignHCenter);
+    lay->addWidget(nextDay_,   0, Qt::AlignHCenter);
     lay->addStretch(1);
 
     connect(play_,      &QPushButton::clicked, this, &PlaybackSideControls::playClicked);
@@ -46,10 +48,11 @@ PlaybackSideControls::PlaybackSideControls(QWidget* parent)
     connect(forward10_, &QPushButton::clicked, this, &PlaybackSideControls::forward10Clicked);
     connect(speed_,     &QPushButton::clicked, this, &PlaybackSideControls::speedCycleClicked);
     connect(prevDay_,   &QPushButton::clicked, this, &PlaybackSideControls::previousDayClicked);
+    connect(nextDay_,   &QPushButton::clicked, this, &PlaybackSideControls::nextDayClicked);
 }
 
 void PlaybackSideControls::setEnabledControls(bool on) {
-    for (auto* b : {play_, pause_, rewind10_, forward10_, speed_, prevDay_})
+    for (auto* b : {play_, pause_, rewind10_, forward10_, speed_, prevDay_, nextDay_})
         b->setEnabled(on);
 }
 

@@ -356,7 +356,9 @@ void ArchiveWidget::openVideoPlayer(QListWidgetItem *item) {
     }
     qDebug() << "Opening Video Player for:" << videoPath;
     VideoPlayerWindow *playerWindow = new VideoPlayerWindow(videoPath);
-    playerWindow->show();
+    playerWindow->showFullScreen();
+    playerWindow->activateWindow();
+    playerWindow->raise();
 }
 QList<VideoMetadata> ArchiveWidget::extractVideoMetadata(const QString& archiveDirPath) {
     QList<VideoMetadata> list;

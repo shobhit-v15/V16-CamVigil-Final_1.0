@@ -6,8 +6,7 @@
 #include <QShowEvent>
 #include <QResizeEvent>
 #include <QEvent>
-
-#include <gst/video/videooverlay.h>   // gst_video_overlay_*
+#include <gst/video/videooverlay.h>
 
 // -------------------- Bus thread --------------------
 void GstBusThread::run() {
@@ -21,7 +20,6 @@ void GstBusThread::run() {
             if (isInterruptionRequested()) break;
             continue;
         }
-
         switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_ERROR: {
             GError *err = nullptr; gchar *dbg = nullptr;
@@ -35,14 +33,11 @@ void GstBusThread::run() {
         case GST_MESSAGE_EOS:
             emit gstEos();
             break;
-        default:
-            break;
+        default: break;
         }
-
         gst_message_unref(msg);
         if (isInterruptionRequested()) break;
     }
-
     gst_object_unref(bus);
 }
 
@@ -51,7 +46,6 @@ static inline GstElement* try_make(const char* factory) {
     return gst_element_factory_make(factory, nullptr);
 }
 
-// Recursively find the first element in a bin that implements GstVideoOverlay
 static GstElement* find_overlay_in_bin(GstElement *elem) {
     if (!elem) return nullptr;
     if (GST_IS_VIDEO_OVERLAY(elem)) return elem;
@@ -72,56 +66,101 @@ VideoPlayerWindow::VideoPlayerWindow(const QString& filePath, QWidget *parent)
 {
     gst_init(nullptr, nullptr);
 
-    setWindowTitle("Video Playback");
+    // Global minimal grey theme
+    setStyleSheet(R"(
+      QWidget{ background:#0d0d0d; color:#bbb; font:13px "Inter","Segoe UI","DejaVu Sans"; }
+      QLabel{ color:#bbb; }
+      QFrame#ControlBar { background:#1e1e1e; border:1px solid #333; border-radius:10px; }
+      QPushButton{
+        background:#2a2a2a; color:#ddd; border:1px solid #5a5a5a; border-radius:8px;
+        padding:8px 14px;
+      }
+      QPushButton:hover{ background:#3a3a3a; }
+      QPushButton:pressed{ background:#222; }
+      QPushButton:disabled{ background:#1a1a1a; color:#777; border-color:#3a3a3a; }
+      QSlider::groove:horizontal{
+        height:6px; background:#1e1e1e; border:1px solid #333; border-radius:4px; margin:0 8px;
+      }
+      QSlider::sub-page:horizontal{ background:#3a3a3a; border:1px solid #444; border-radius:4px; }
+      QSlider::add-page:horizontal{ background:#151515; border:1px solid #222; border-radius:4px; }
+      QSlider::handle:horizontal{
+        width:14px; height:14px; margin:-5px -7px; border-radius:7px;
+        background:#ddd; border:1px solid #666;
+      }
+      QSlider::handle:horizontal:hover{ background:#fff; }
+    )");
+
+    setAttribute(Qt::WA_DeleteOnClose, true);
     resize(960, 600);
-    setStyleSheet("background-color: black;");
 
     auto *mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(12,12,12,12);
+    mainLayout->setSpacing(10);
 
+    // Header info
     QFileInfo fi(filePath);
-    const QString fileName    = fi.fileName();
-    const QString fileDateTime= fi.lastModified().toString("yyyy-MM-dd hh:mm:ss");
+    const QString fileName     = fi.fileName();
+    const QString fileDateTime = fi.lastModified().toString("yyyy-MM-dd hh:mm:ss");
 
-    fileInfoLabel = new QLabel(QString("📂 %1\n📅 %2").arg(fileName, fileDateTime), this);
-    fileInfoLabel->setStyleSheet("color: white; font-size: 14px; padding: 10px;");
+    fileInfoLabel = new QLabel(QString("📂 %1    |    📅 %2").arg(fileName, fileDateTime), this);
+    fileInfoLabel->setStyleSheet("color:#bbb; font-size:13px; padding:6px; background:#1e1e1e; border:1px solid #333; border-radius:8px;");
     fileInfoLabel->setAlignment(Qt::AlignCenter);
     mainLayout->addWidget(fileInfoLabel);
 
-    // Video area (must be native to get a window handle)
+    // Native video area
     videoArea = new QWidget(this);
-    videoArea->setStyleSheet("background:black;");
+    videoArea->setStyleSheet("background:#111; border:1px solid #222; border-radius:8px;");
     videoArea->setAttribute(Qt::WA_NativeWindow);
     mainLayout->addWidget(videoArea, /*stretch*/1);
 
-    // Minimal controls: Play/Pause + time label
-    auto *controlsLayout = new QHBoxLayout();
+    // Seek slider (full width)
+    seekSlider = new QSlider(Qt::Horizontal, this);
+    seekSlider->setRange(0, 0);
+    seekSlider->setSingleStep(1000);   // 1s
+    seekSlider->setPageStep(5000);     // 5s
+    seekSlider->setTracking(false);
+    connect(seekSlider, &QSlider::sliderPressed,  this, &VideoPlayerWindow::onSeekPressed);
+    connect(seekSlider, &QSlider::sliderReleased, this, &VideoPlayerWindow::onSeekReleased);
+    // connect(seekSlider, &QSlider::valueChanged, this, &VideoPlayerWindow::onSeekMoved); // enable for live seek
+    mainLayout->addWidget(seekSlider);
 
-    playPauseButton = new QPushButton("⏸ Pause", this);
+    // Bottom symmetric control bar
+    controlBar = new QFrame(this);
+    controlBar->setObjectName("ControlBar");
+    auto *barLayout = new QHBoxLayout(controlBar);
+    barLayout->setContentsMargins(12,8,12,8);
+    barLayout->setSpacing(10);
+
+    // Left: play/pause
+    playPauseButton = new QPushButton("⏸ Pause", controlBar);
+    playPauseButton->setMinimumWidth(110);
     connect(playPauseButton, &QPushButton::clicked, this, &VideoPlayerWindow::playPauseVideo);
-    controlsLayout->addWidget(playPauseButton);
+    barLayout->addWidget(playPauseButton, 0, Qt::AlignLeft);
 
-    controlsLayout->addStretch();
+    // Center: time label
+    timeLabel = new QLabel("00:00 / 00:00", controlBar);
+    timeLabel->setAlignment(Qt::AlignCenter);
+    barLayout->addWidget(timeLabel, 1); // stretch to center
 
-    timeLabel = new QLabel("00:00 / 00:00", this);
-    timeLabel->setStyleSheet("color: white;");
-    controlsLayout->addWidget(timeLabel);
-
-    mainLayout->addLayout(controlsLayout);
-
-    closeButton = new QPushButton("❌ Close", this);
+    // Right: close
+    closeButton = new QPushButton("Close", controlBar);
     connect(closeButton, &QPushButton::clicked, this, &VideoPlayerWindow::close);
-    mainLayout->addWidget(closeButton, 0, Qt::AlignCenter);
+    barLayout->addWidget(closeButton, 0, Qt::AlignRight);
+
+    mainLayout->addWidget(controlBar);
 
     setLayout(mainLayout);
 
-    // UI update timer (position)
+    // Polling timer
     updateTimer = new QTimer(this);
+    updateTimer->setTimerType(Qt::CoarseTimer);
+    updateTimer->setInterval(200);
     connect(updateTimer, &QTimer::timeout, this, &VideoPlayerWindow::updateElapsedTime);
 
     // Build and start pipeline
     initPipeline(filePath);
 
-    // Bus thread so messages are serviced off the GUI thread
+    // Bus thread
     busThread = new GstBusThread(this);
     busThread->setPipeline(pipeline);
     connect(busThread, &GstBusThread::gstError, this, &VideoPlayerWindow::onGstError);
@@ -130,27 +169,20 @@ VideoPlayerWindow::VideoPlayerWindow(const QString& filePath, QWidget *parent)
 }
 
 void VideoPlayerWindow::initPipeline(const QString &filePath) {
-    // --- Elements ---
     GstElement *filesrc = try_make("filesrc");
     g_object_set(filesrc, "location", filePath.toUtf8().constData(), NULL);
 
     GstElement *demux   = try_make("matroskademux");
     GstElement *parser  = try_make("h264parse");
 
-    // Prefer Intel VAAPI; fallback to software if not available
     GstElement *decoder = try_make("vaapih264dec");
-    bool usingVaapi = (decoder != nullptr);
+    const bool usingVaapi = (decoder != nullptr);
     if (!decoder) decoder = try_make("avdec_h264");
 
-    // Threading queues for smoother decode/display
-    GstElement *q1 = try_make("queue");  // after parser
-    GstElement *q2 = try_make("queue");  // after decoder
-
-    // Convert to CPU/system memory for stable X11 sink
+    GstElement *q1 = try_make("queue");
+    GstElement *q2 = try_make("queue");
     GstElement *vconv = try_make("videoconvert");
-
-    // X11 sink (overlay-capable, embeds into our widget)
-    GstElement *sink = try_make("ximagesink");
+    GstElement *sink  = try_make("ximagesink");
 
     if (!filesrc || !demux || !parser || !decoder || !vconv || !sink) {
         qWarning() << "Failed to create required GStreamer elements";
@@ -162,7 +194,6 @@ void VideoPlayerWindow::initPipeline(const QString &filePath) {
     if (g_object_class_find_property(G_OBJECT_GET_CLASS(sink), "sync"))
         g_object_set(sink, "sync", TRUE, NULL);
 
-    // --- Pipeline ---
     pipeline = gst_pipeline_new("archive-player");
     gst_bin_add_many(GST_BIN(pipeline), filesrc, demux, parser, NULL);
     if (q1) gst_bin_add(GST_BIN(pipeline), q1);
@@ -177,7 +208,7 @@ void VideoPlayerWindow::initPipeline(const QString &filePath) {
     if (q2) gst_element_link_many(decoder, q2, vconv, sink, NULL);
     else    gst_element_link_many(decoder, vconv, sink, NULL);
 
-    // Dynamic pad (demux -> parser), only link VIDEO pads
+    // Demux dynamic pad (video only)
     g_signal_connect(demux, "pad-added",
         G_CALLBACK(+[] (GstElement*, GstPad *pad, gpointer data){
             auto *parser = static_cast<GstElement*>(data);
@@ -194,30 +225,27 @@ void VideoPlayerWindow::initPipeline(const QString &filePath) {
             gst_object_unref(sinkPad);
         }), parser);
 
-    // Install sync handler BEFORE preroll so we answer prepare-window-handle in time
     installBusSyncHandler();
 
-    // 1) PREROLL → we want caps/size negotiated before binding overlay
+    // Preroll to get caps
     gst_element_set_state(pipeline, GST_STATE_PAUSED);
-    GstStateChangeReturn preroll = gst_element_get_state(pipeline, nullptr, nullptr, GST_SECOND * 3);
+    const GstStateChangeReturn preroll =
+        gst_element_get_state(pipeline, nullptr, nullptr, GST_SECOND * 3);
     qDebug() << "[Player] Preroll state:" << preroll
              << "Decoder:" << (usingVaapi ? "vaapih264dec" : "avdec_h264");
 
-    // 2) Find overlay-capable element (ximagesink itself)
     videoSink = find_overlay_in_bin(sink);
 
-    // Safety: ensure it’s bound and rectangle applied (prepare-window-handle should also do it)
     bindOverlay();
     applyRenderRect();
 
-    // 3) PLAY
+    // Play
     gst_element_set_state(pipeline, GST_STATE_PLAYING);
     isPlaying = true;
     playPauseButton->setText("⏸ Pause");
 
-    // Duration + start UI timer
     queryDuration();
-    updateTimer->start(250);
+    updateTimer->start();
 }
 
 // -------------------- Bus sync handler --------------------
@@ -228,18 +256,15 @@ GstBusSyncReply VideoPlayerWindow::onBusSync(GstBus * /*bus*/, GstMessage *msg, 
     auto *self = static_cast<VideoPlayerWindow*>(user_data);
     if (!self || !self->videoSink || !self->videoArea) return GST_BUS_PASS;
 
-    // Ensure child XID exists
-    (void)self->videoArea->winId();
+    (void)self->videoArea->winId(); // ensure handle
 
     gst_video_overlay_set_window_handle(
         GST_VIDEO_OVERLAY(self->videoSink),
         (guintptr)self->videoArea->winId()
     );
-
-    // Apply the current rectangle immediately
     self->applyRenderRect();
 
-    return GST_BUS_DROP; // we handled it
+    return GST_BUS_DROP;
 }
 
 void VideoPlayerWindow::installBusSyncHandler() {
@@ -254,7 +279,6 @@ void VideoPlayerWindow::installBusSyncHandler() {
 // -------------------- Overlay binding & sizing --------------------
 void VideoPlayerWindow::bindOverlay() {
     if (!videoSink || !videoArea) return;
-    // ensure native handle exists
     (void)videoArea->winId();
     if (GST_IS_VIDEO_OVERLAY(videoSink)) {
         gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(videoSink),
@@ -266,13 +290,7 @@ void VideoPlayerWindow::bindOverlay() {
 void VideoPlayerWindow::applyRenderRect() {
     if (!videoSink || !videoArea) return;
     if (!GST_IS_VIDEO_OVERLAY(videoSink)) return;
-
-    // X11 ximagesink expects coordinates in widget pixels (no DPR scaling)
-    const int x = 0;
-    const int y = 0;
-    const int w = videoArea->width();
-    const int h = videoArea->height();
-
+    const int x = 0, y = 0, w = videoArea->width(), h = videoArea->height();
     gst_video_overlay_set_render_rectangle(GST_VIDEO_OVERLAY(videoSink), x, y, w, h);
     gst_video_overlay_expose(GST_VIDEO_OVERLAY(videoSink));
 }
@@ -286,7 +304,6 @@ bool VideoPlayerWindow::eventFilter(QObject *obj, QEvent *ev) {
 
 void VideoPlayerWindow::showEvent(QShowEvent *e) {
     QWidget::showEvent(e);
-    // Track direct size changes of the child native window
     if (videoArea) videoArea->installEventFilter(this);
     bindOverlay();
     applyRenderRect();
@@ -305,24 +322,45 @@ void VideoPlayerWindow::queryDuration() {
         durationMs = durNs / GST_MSECOND;
         const QString total = QTime(0,0).addMSecs(durationMs).toString("mm:ss");
         timeLabel->setText(QString("00:00 / %1").arg(total));
+        if (seekSlider) seekSlider->setRange(0, int(durationMs));
     }
 }
 
 void VideoPlayerWindow::playPauseVideo() {
     if (!pipeline) return;
     gst_element_set_state(pipeline, isPlaying ? GST_STATE_PAUSED : GST_STATE_PLAYING);
-    playPauseButton->setText(isPlaying ? "▶ Play" : "⏸ Pause");
     isPlaying = !isPlaying;
+    playPauseButton->setText(isPlaying ? "⏸ Pause" : "▶ Play");
+}
+
+bool VideoPlayerWindow::seekToMs(qint64 ms) {
+    if (!pipeline) return false;
+    ms = clampMs(ms);
+    const qint64 ns = ms * GST_MSECOND;
+    return gst_element_seek(
+        pipeline, 1.0, GST_FORMAT_TIME,
+        (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT | GST_SEEK_FLAG_SNAP_NEAREST),
+        GST_SEEK_TYPE_SET, ns,
+        GST_SEEK_TYPE_NONE, GST_CLOCK_TIME_NONE);
 }
 
 void VideoPlayerWindow::updateElapsedTime() {
     if (!pipeline) return;
-    gint64 posNs = 0;
+    gint64 posNs = 0, durNs = 0;
     if (gst_element_query_position(pipeline, GST_FORMAT_TIME, &posNs)) {
         const qint64 posMs = posNs / GST_MSECOND;
+        if (seekSlider && !draggingSeek) seekSlider->setValue(int(posMs));
         const QString cur = QTime(0,0).addMSecs(posMs).toString("mm:ss");
         const QString tot = QTime(0,0).addMSecs(durationMs).toString("mm:ss");
         timeLabel->setText(QString("%1 / %2").arg(cur, tot));
+    }
+    // late duration update
+    if (gst_element_query_duration(pipeline, GST_FORMAT_TIME, &durNs)) {
+        const qint64 dMs = durNs / GST_MSECOND;
+        if (dMs > 0 && dMs != durationMs) {
+            durationMs = dMs;
+            if (seekSlider) seekSlider->setRange(0, int(durationMs));
+        }
     }
 }
 
@@ -331,11 +369,39 @@ void VideoPlayerWindow::onGstError(QString msg) {
 }
 
 void VideoPlayerWindow::onGstEos() {
-    qDebug() << "Playback reached EOS";
-    // Optional: close player or loop.
+    isPlaying = false;
+    playPauseButton->setText("▶ Play");
+    if (updateTimer) updateTimer->stop();
+}
+
+void VideoPlayerWindow::onSeekPressed() {
+    draggingSeek = true;
+}
+
+void VideoPlayerWindow::onSeekReleased() {
+    draggingSeek = false;
+    if (!seekSlider) return;
+    seekToMs(seekSlider->value());
+}
+
+void VideoPlayerWindow::onSeekMoved(int v) {
+    if (!draggingSeek) return;
+    seekToMs(v); // enable for live preview while dragging
+}
+
+void VideoPlayerWindow::keyPressEvent(QKeyEvent *e) {
+    switch (e->key()) {
+    case Qt::Key_Space:  playPauseVideo(); return;
+    case Qt::Key_Left:   seekToMs((seekSlider ? seekSlider->value() : 0) - 5000); return;
+    case Qt::Key_Right:  seekToMs((seekSlider ? seekSlider->value() : 0) + 5000); return;
+    case Qt::Key_Escape: close(); return;
+    default: break;
+    }
+    QWidget::keyPressEvent(e);
 }
 
 VideoPlayerWindow::~VideoPlayerWindow() {
+    if (updateTimer) updateTimer->stop();
     if (busThread) {
         busThread->requestInterruption();
         busThread->wait(300);
