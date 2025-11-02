@@ -49,7 +49,7 @@ bool PlaybackVideoPlayerGst::open(const QString& path) {
         // filesrc ! demux ! queue_demux ! h264parse ! avdec_h264 ! queue_post ! videoconvert ! sink
         queue_demux = mk("queue");
         parser      = mk("h264parse");
-        decoder     = mk("avdec_h264");
+        decoder     = mk("vaapih264dec");
         queue_post  = mk("queue");
         vconv       = mk("videoconvert");
         videosink   = mk("glimagesink");

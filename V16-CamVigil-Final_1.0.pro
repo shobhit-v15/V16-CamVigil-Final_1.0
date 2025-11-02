@@ -1,4 +1,4 @@
-QT       += core gui
+QT += core gui
 QT += widgets multimedia multimediawidgets opengl
 QT += sql
 QT += network concurrent
@@ -18,9 +18,9 @@ LIBS += -Wl,--no-as-needed -ludev -Wl,--as-needed
 
 LIBS += -lGL
 
-LIBS     += -lgstreamer-1.0 -lgstvideo-1.0 -lgstapp-1.0 -lgstbase-1.0 -lgobject-2.0 -lglib-2.0
+LIBS += -lgstreamer-1.0 -lgstvideo-1.0 -lgstapp-1.0 -lgstbase-1.0 -lgobject-2.0 -lglib-2.0
 
-QT       += dbus concurrent
+QT += dbus concurrent
 
 SOURCES += \
     archivemanager.cpp \
